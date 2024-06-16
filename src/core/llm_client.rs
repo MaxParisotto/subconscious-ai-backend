@@ -2,7 +2,7 @@ use colored::*;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use crate::task_manager::Task; // Import Task
+use crate::core::task_manager::Task; // Import Task
 
 #[derive(Debug, Serialize)]
 struct LLMInput {

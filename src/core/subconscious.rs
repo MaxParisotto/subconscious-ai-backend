@@ -1,5 +1,5 @@
-use crate::task_manager::{Task, TaskManager, TaskStatus};
-use crate::llm_client::LLMClient;
+use crate::core::task_manager::{Task, TaskManager, TaskStatus};
+use crate::core::llm_client::LLMClient;
 use std::collections::VecDeque;
 use log::info;
 

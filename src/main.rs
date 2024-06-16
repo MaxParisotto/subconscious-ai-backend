@@ -1,8 +1,3 @@
-use tokio::main;
-use crate::task_manager::{Task, TaskManager, TaskStatus};
-use crate::core_loop::core_loop;
-use crate::subconscious::Subconscious;
-use crate::llm_client::LLMClient;
 use config::Config;
 use std::sync::Arc;
 use std::thread;
@@ -14,11 +9,28 @@ use log::LevelFilter;
 use env_logger::{Builder, Target};
 use warp::reject::Reject;
 use serde::Deserialize;
+use lln::neural_network::NeuralNetwork;
 
-mod task_manager;
-mod core_loop;
-mod subconscious;
-mod llm_client;
+// Import modules from their respective paths
+mod core {
+    pub mod core_loop;
+    pub mod llm_client;
+    pub mod subconscious;
+    pub mod task_manager;
+}
+mod lln {
+    pub mod neural_network;
+}
+mod plugins {
+    pub mod plugin_manager;
+}
+mod tasks; // Import the tasks module
+
+use core::task_manager::{TaskManager, Task, TaskStatus};
+use core::core_loop::core_loop;
+use core::subconscious::Subconscious;
+use core::llm_client::LLMClient;
+use plugins::plugin_manager::PluginManager;
 
 #[derive(Debug)]
 struct CustomError;
@@ -30,7 +42,13 @@ struct Query {
     query: String,
 }
 
-#[main]
+// Define the Plugin trait
+pub trait Plugin {
+    fn initialize(&self);
+    fn execute(&self);
+}
+
+#[tokio::main]
 async fn main() {
     // Set up logging to a file
     let file = OpenOptions::new()
@@ -50,55 +68,15 @@ async fn main() {
         .add_source(config::File::with_name("config"))
         .build()
         .unwrap();
-
     let redis_url = settings.get_string("redis.url").unwrap();
     let llm_url = settings.get_string("llm.url").unwrap();
     let model_name = settings.get_string("llm.model").unwrap();
     let llm_client = LLMClient::new(&llm_url, &model_name);
     let task_manager = TaskManager::new(&redis_url);
-
     let subconscious = Arc::new(Mutex::new(Subconscious::new(task_manager.clone(), llm_client.clone())));
 
-    // Add the persistent task at startup
-    let persistent_tasks = vec![
-        Task {
-            description: "Self Health Check".to_string(),
-            action: "check_status".to_string(),
-            status: TaskStatus::Pending,
-            is_permanent: true,
-        },
-        Task {
-            description: "Read from Redis".to_string(),
-            action: "display_redis_data".to_string(),
-            status: TaskStatus::Pending,
-            is_permanent: true,
-        },
-        Task {
-            description: "Start LLM interaction".to_string(),
-            action: "start_llm_communications".to_string(),
-            status: TaskStatus::Pending,
-            is_permanent: true,
-        },
-        Task {
-            description: "Log Analysis".to_string(),
-            action: "comment_last_logs".to_string(),
-            status: TaskStatus::Pending,
-            is_permanent: true,
-        },
-        Task {
-            description: "Self analysis and new tasks".to_string(),
-            action: "take_improvement_actions".to_string(),
-            status: TaskStatus::Pending,
-            is_permanent: true,
-        },
-        Task {
-            description: "Write a detailed report of concepts and behaviors learned so far".to_string(),
-            action: "write_detailed_report".to_string(),
-            status: TaskStatus::Pending,
-            is_permanent: true,
-        }
-    ];
-
+    // Add the persistent tasks at startup
+    let persistent_tasks = tasks::get_persistent_tasks(); // Fetch tasks from tasks.rs
     for task in persistent_tasks {
         if let Err(e) = task_manager.add_task(task.clone()).await {
             error!("Failed to add persistent task: {:?}", e);
@@ -131,7 +109,6 @@ async fn main() {
                     debug!("Returning tasks: {:?}", tasks);
                     Ok::<_, warp::Rejection>(warp::reply::json(&tasks))
                 });
-
             let add_task = warp::path("add_task")
                 .and(warp::post())
                 .and(warp::body::json())
@@ -150,7 +127,6 @@ async fn main() {
                     info!("Task added via API: {:?}", task);
                     Ok::<_, warp::Rejection>(warp::reply::with_status("Task added", warp::http::StatusCode::OK))
                 });
-
             let validate_task = warp::path("validate_task")
                 .and(warp::post())
                 .and(warp::body::json())
@@ -169,7 +145,6 @@ async fn main() {
                     info!("Task validated via API: {:?}", task);
                     Ok::<_, warp::Rejection>(warp::reply::with_status("Task validated", warp::http::StatusCode::OK))
                 });
-
             let change_model = warp::path!("change_model" / String)
                 .and(warp::post())
                 .and(state_filter.clone())
@@ -179,7 +154,6 @@ async fn main() {
                     state.llm_client.change_model(&model);
                     Ok::<_, warp::Rejection>(warp::reply::json(&format!("Model changed to: {}", model)))
                 });
-
             let ask_llm = warp::path("ask_llm")
                 .and(warp::post())
                 .and(warp::body::json())
@@ -199,7 +173,6 @@ async fn main() {
                         }
                     }
                 });
-
             let status_route = warp::path("status")
                 .and(warp::get())
                 .and(state_filter)
@@ -209,7 +182,6 @@ async fn main() {
                     debug!("Returning status: {:?}", status);
                     Ok::<_, warp::Rejection>(warp::reply::json(&status))
                 });
-
             let routes = hello_route.or(get_tasks).or(add_task).or(validate_task).or(change_model).or(ask_llm).or(status_route);
 
             // Combine routes and serve
@@ -219,6 +191,23 @@ async fn main() {
         });
     });
 
+    // Initialize plugin manager
+    let plugin_manager = PluginManager::new();
+    plugin_manager.initialize_plugins();
+    plugin_manager.execute_plugins();
+
+    // Initialize the LNN
+    let mut neural_network = NeuralNetwork::new();
+
+    // Example data for training
+    let training_data = vec![0.0, 1.0, 0.0, 1.0];
+    neural_network.train(&training_data);
+
+    // Example input for prediction
+    let input_data = vec![1.0, 0.0];
+    let prediction = neural_network.predict(&input_data);
+    println!("Prediction: {:?}", prediction);
+
     // Start the core loop
     tokio::spawn(async move {
         core_loop(subconscious).await;
@@ -227,6 +216,7 @@ async fn main() {
     // Wait for the API thread to finish (if needed)
     api_thread.join().unwrap();
 }
+
 // Example shared state struct
 #[derive(Debug)]
 struct SomeSharedState {
@@ -235,7 +225,6 @@ struct SomeSharedState {
     #[allow(dead_code)] // Add this line to suppress the warning
     subconscious: Arc<Mutex<Subconscious>>,
 }
-
 
 impl SomeSharedState {
     fn new(task_manager: TaskManager, llm_client: LLMClient, subconscious: Arc<Mutex<Subconscious>>) -> Self {

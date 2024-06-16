@@ -2,24 +2,13 @@
 url = "redis://192.168.0.34:6379"
 
 [llm]
-url = "http://192.168.1.72:11434/api/generate"
+url = "http://192.168.1.83:11434/api/generate"
 model = "llama3"
 
 [init-tasks]
-task1 = {name = "Self Health Check", action = "check_status"} 
-#check connections with Redis and LLM endpoint 
-
+task1 = {name = "Self Health Check: check then task assigned, make a bulletpoint list and start working on it", action = "check_status"} 
 task2 = {name = "Read from Redis", action = "display_redis_data"} 
-#read data from Redis
-
 task3 = {name = "Start LLM interaction", action = "start_llm_communications"} 
-#start LLM "conscious chin of thoughts" by pulling the last logs and produce a summary of it
-
 task4 = {name = "Log Analysis", action = "comment_last_logs"} 
-#the LLM will comment on the last logs and display the results
-
 task5 = {name = "Self analysys and new tasks", action = "take_improvement_actions"} 
-#the LLM will analyze the results and write what he think it went well and replicate, also what to remember was a bad decision and ask a human feedback
-
 task6 = {name = "Write a detailed report of concepts and behaviors learned so far", action = "write_detailed_report"} 
-#the LLM will write a detailed report of concepts and behaviors learned so far

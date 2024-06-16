@@ -1,4 +1,4 @@
-use crate::subconscious::Subconscious;
+use crate::core::subconscious::Subconscious;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration, Instant};
@@ -27,27 +27,21 @@ pub async fn core_loop(subconscious: Arc<Mutex<Subconscious>>) {
         let start_time = Instant::now();
         loop {
             connection_check_interval.tick().await;
-
             let subconscious = subconscious_for_connection_check.lock().await;
-
             info!("Checking Redis connection...");
             match subconscious.task_manager.check_redis_connection().await {
                 Ok(_) => println!("{}", "Redis connection: OK".green()),
                 Err(e) => eprintln!("Failed to check Redis connection: {}", e),
             }
-
             info!("Checking LLM connection...");
             match subconscious.llm_client.check_llm_connection().await {
                 Ok(_) => println!("{}", "LLM connection: OK".green()),
                 Err(e) => eprintln!("Failed to check LLM connection: {}", e),
             }
-
             let elapsed = start_time.elapsed().as_secs();
             let iterations_per_second = elapsed as f64 / 10.0;
-
             let ongoing_tasks = subconscious.task_manager.get_tasks().await;
             let ongoing_task_descriptions: Vec<String> = ongoing_tasks.iter().map(|task| task.description.clone()).collect();
-
             println!(
                 "{}",
                 format!(
@@ -57,7 +51,6 @@ pub async fn core_loop(subconscious: Arc<Mutex<Subconscious>>) {
                     ongoing_task_descriptions
                 )
             );
-
             // Print memories
             subconscious.print_memories();
         }
