@@ -1,5 +1,3 @@
-// src/lln/neural_network.rs
-
 pub struct NeuralNetwork;
 
 impl NeuralNetwork {
@@ -8,13 +6,11 @@ impl NeuralNetwork {
     }
 
     pub fn train(&mut self, _data: &[f64]) {
-        // Training logic here
+        // Your training logic here
     }
 
-    pub fn predict(&self, _input: &[f64]) -> Vec<f64> {
-        // Prediction logic here
-        vec![]
+    pub async fn predict(&self, _input: &[f64]) -> Vec<f64> {
+        // Your prediction logic here
+        vec![] // Example return value
     }
 }
-
-use tokio::time::{sleep, Duration};

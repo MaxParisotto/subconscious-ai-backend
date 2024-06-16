@@ -9,7 +9,6 @@ use log::LevelFilter;
 use env_logger::{Builder, Target};
 use warp::reject::Reject;
 use serde::Deserialize;
-use lln::neural_network::NeuralNetwork;
 
 // Import modules from their respective paths
 mod core {
@@ -50,7 +49,30 @@ pub trait Plugin {
 
 #[tokio::main]
 async fn main() {
-    // Set up logging to a file
+    setup_logging();
+    info!("Starting application...");
+
+    let settings = load_settings();
+    let (redis_url, llm_url, model_name) = extract_settings(&settings);
+
+    let llm_client = LLMClient::new(&llm_url, &model_name);
+    let task_manager = TaskManager::new(&redis_url);
+    let subconscious = Arc::new(Mutex::new(Subconscious::new(task_manager.clone(), llm_client.clone())));
+
+    add_persistent_tasks(&task_manager).await;
+
+    let state = Arc::new(Mutex::new(SomeSharedState::new(task_manager.clone(), llm_client.clone(), subconscious.clone())));
+
+    let api_thread = spawn_api_server(state.clone());
+
+    initialize_plugins();
+
+    start_core_loop(subconscious);
+
+    api_thread.join().unwrap();
+}
+
+fn setup_logging() {
     let file = OpenOptions::new()
         .append(true)
         .create(true)
@@ -60,22 +82,23 @@ async fn main() {
         .target(Target::Pipe(Box::new(file)))
         .filter_level(LevelFilter::Debug)
         .init();
+}
 
-    info!("Starting application...");
-
-    // Load settings from config file
-    let settings = Config::builder()
+fn load_settings() -> Config {
+    Config::builder()
         .add_source(config::File::with_name("config"))
         .build()
-        .unwrap();
+        .unwrap()
+}
+
+fn extract_settings(settings: &Config) -> (String, String, String) {
     let redis_url = settings.get_string("redis.url").unwrap();
     let llm_url = settings.get_string("llm.url").unwrap();
     let model_name = settings.get_string("llm.model").unwrap();
-    let llm_client = LLMClient::new(&llm_url, &model_name);
-    let task_manager = TaskManager::new(&redis_url);
-    let subconscious = Arc::new(Mutex::new(Subconscious::new(task_manager.clone(), llm_client.clone())));
+    (redis_url, llm_url, model_name)
+}
 
-    // Add the persistent tasks at startup
+async fn add_persistent_tasks(task_manager: &TaskManager) {
     let persistent_tasks = tasks::get_persistent_tasks(); // Fetch tasks from tasks.rs
     for task in persistent_tasks {
         if let Err(e) = task_manager.add_task(task.clone()).await {
@@ -84,104 +107,44 @@ async fn main() {
             info!("Added persistent task: {:?}", task);
         }
     }
+}
 
-    // Shared state for API server
-    let state = Arc::new(Mutex::new(SomeSharedState::new(task_manager.clone(), llm_client.clone(), subconscious.clone())));
-
-    // Clone the state for API thread
-    let api_state = state.clone();
-
-    // Spawn a thread for the API server
-    let api_thread = thread::spawn(move || {
+fn spawn_api_server(state: Arc<Mutex<SomeSharedState>>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let state_filter = warp::any().map(move || api_state.clone());
+            let state_filter = warp::any().map(move || state.clone());
 
             // Define API routes
             let hello_route = warp::path!("hello").map(|| "Hello from the API!");
             let get_tasks = warp::path("tasks")
                 .and(warp::get())
                 .and(state_filter.clone())
-                .and_then(|state: Arc<Mutex<SomeSharedState>>| async move {
-                    debug!("Received request to get tasks");
-                    let state = state.lock().await;
-                    let tasks = state.task_manager.get_tasks().await;
-                    debug!("Returning tasks: {:?}", tasks);
-                    Ok::<_, warp::Rejection>(warp::reply::json(&tasks))
-                });
+                .and_then(handle_get_tasks);
             let add_task = warp::path("add_task")
                 .and(warp::post())
                 .and(warp::body::json())
                 .and(state_filter.clone())
-                .and_then(|task: Task, state: Arc<Mutex<SomeSharedState>>| async move {
-                    debug!("Received request to add task: {:?}", task);
-                    {
-                        let state = state.lock().await;
-                        debug!("Adding task to task manager: {:?}", task);
-                        if let Err(e) = state.task_manager.add_task(task.clone()).await {
-                            error!("Failed to add task via API: {:?}", e);
-                            return Err(warp::reject::custom(CustomError));
-                        }
-                        debug!("Task added to task manager: {:?}", task);
-                    }
-                    info!("Task added via API: {:?}", task);
-                    Ok::<_, warp::Rejection>(warp::reply::with_status("Task added", warp::http::StatusCode::OK))
-                });
+                .and_then(handle_add_task);
             let validate_task = warp::path("validate_task")
                 .and(warp::post())
                 .and(warp::body::json())
                 .and(state_filter.clone())
-                .and_then(|task: Task, state: Arc<Mutex<SomeSharedState>>| async move {
-                    debug!("Received request to validate task: {:?}", task);
-                    {
-                        let state = state.lock().await;
-                        debug!("Validating task: {:?}", task);
-                        if let Err(e) = state.task_manager.update_task_status(&task, TaskStatus::Completed).await {
-                            error!("Failed to validate task via API: {:?}", e);
-                            return Err(warp::reject::custom(CustomError));
-                        }
-                        debug!("Task validated: {:?}", task);
-                    }
-                    info!("Task validated via API: {:?}", task);
-                    Ok::<_, warp::Rejection>(warp::reply::with_status("Task validated", warp::http::StatusCode::OK))
-                });
+                .and_then(handle_validate_task);
             let change_model = warp::path!("change_model" / String)
                 .and(warp::post())
                 .and(state_filter.clone())
-                .and_then(|model: String, state: Arc<Mutex<SomeSharedState>>| async move {
-                    let mut state = state.lock().await;
-                    debug!("Changing model to: {}", model);
-                    state.llm_client.change_model(&model);
-                    Ok::<_, warp::Rejection>(warp::reply::json(&format!("Model changed to: {}", model)))
-                });
+                .and_then(handle_change_model);
             let ask_llm = warp::path("ask_llm")
                 .and(warp::post())
                 .and(warp::body::json())
                 .and(state_filter.clone())
-                .and_then(|query: Query, state: Arc<Mutex<SomeSharedState>>| async move {
-                    debug!("Received query: {}", query.query);
-                    let state = state.lock().await;
-                    let tasks = state.task_manager.get_tasks().await;
-                    match state.llm_client.process_query(&query.query, tasks).await {
-                        Ok(response) => {
-                            info!("LLM response: {}", response);
-                            Ok::<_, warp::Rejection>(warp::reply::json(&response))
-                        }
-                        Err(e) => {
-                            error!("Failed to process query with LLM: {:?}", e);
-                            Err(warp::reject::custom(CustomError))
-                        }
-                    }
-                });
+                .and_then(handle_ask_llm);
             let status_route = warp::path("status")
                 .and(warp::get())
                 .and(state_filter)
-                .and_then(|state: Arc<Mutex<SomeSharedState>>| async move {
-                    let state = state.lock().await;
-                    let status = state.get_status();
-                    debug!("Returning status: {:?}", status);
-                    Ok::<_, warp::Rejection>(warp::reply::json(&status))
-                });
+                .and_then(handle_status);
+
             let routes = hello_route.or(get_tasks).or(add_task).or(validate_task).or(change_model).or(ask_llm).or(status_route);
 
             // Combine routes and serve
@@ -189,32 +152,87 @@ async fn main() {
                 .run(([0, 0, 0, 0], 3030))
                 .await;
         });
-    });
+    })
+}
 
-    // Initialize plugin manager
+async fn handle_get_tasks(state: Arc<Mutex<SomeSharedState>>) -> Result<impl warp::Reply, warp::Rejection> {
+    debug!("Received request to get tasks");
+    let state = state.lock().await;
+    let tasks = state.task_manager.get_tasks().await;
+    debug!("Returning tasks: {:?}", tasks);
+    Ok(warp::reply::json(&tasks))
+}
+
+async fn handle_add_task(task: Task, state: Arc<Mutex<SomeSharedState>>) -> Result<impl warp::Reply, warp::Rejection> {
+    debug!("Received request to add task: {:?}", task);
+    {
+        let state = state.lock().await;
+        debug!("Adding task to task manager: {:?}", task);
+        if let Err(e) = state.task_manager.add_task(task.clone()).await {
+            error!("Failed to add task via API: {:?}", e);
+            return Err(warp::reject::custom(CustomError));
+        }
+        debug!("Task added to task manager: {:?}", task);
+    }
+    info!("Task added via API: {:?}", task);
+    Ok(warp::reply::with_status("Task added", warp::http::StatusCode::OK))
+}
+
+async fn handle_validate_task(task: Task, state: Arc<Mutex<SomeSharedState>>) -> Result<impl warp::Reply, warp::Rejection> {
+    debug!("Received request to validate task: {:?}", task);
+    {
+        let state = state.lock().await;
+        debug!("Validating task: {:?}", task);
+        if let Err(e) = state.task_manager.update_task_status(&task, TaskStatus::Completed).await {
+            error!("Failed to validate task via API: {:?}", e);
+            return Err(warp::reject::custom(CustomError));
+        }
+        debug!("Task validated: {:?}", task);
+    }
+    info!("Task validated via API: {:?}", task);
+    Ok(warp::reply::with_status("Task validated", warp::http::StatusCode::OK))
+}
+
+async fn handle_change_model(model: String, state: Arc<Mutex<SomeSharedState>>) -> Result<impl warp::Reply, warp::Rejection> {
+    let mut state = state.lock().await;
+    debug!("Changing model to: {}", model);
+    state.llm_client.change_model(&model);
+    Ok(warp::reply::json(&format!("Model changed to: {}", model)))
+}
+
+async fn handle_ask_llm(query: Query, state: Arc<Mutex<SomeSharedState>>) -> Result<impl warp::Reply, warp::Rejection> {
+    debug!("Received query: {}", query.query);
+    let state = state.lock().await;
+    let tasks = state.task_manager.get_tasks().await;
+    match state.llm_client.process_query(&query.query, tasks).await {
+        Ok(response) => {
+            info!("LLM response: {}", response);
+            Ok(warp::reply::json(&response))
+        }
+        Err(e) => {
+            error!("Failed to process query with LLM: {:?}", e);
+            Err(warp::reject::custom(CustomError))
+        }
+    }
+}
+
+async fn handle_status(state: Arc<Mutex<SomeSharedState>>) -> Result<impl warp::Reply, warp::Rejection> {
+    let state = state.lock().await;
+    let status = state.get_status();
+    debug!("Returning status: {:?}", status);
+    Ok(warp::reply::json(&status))
+}
+
+fn initialize_plugins() {
     let plugin_manager = PluginManager::new();
     plugin_manager.initialize_plugins();
     plugin_manager.execute_plugins();
+}
 
-    // Initialize the LNN
-    let mut neural_network = NeuralNetwork::new();
-
-    // Example data for training
-    let training_data = vec![0.0, 1.0, 0.0, 1.0];
-    neural_network.train(&training_data);
-
-    // Example input for prediction
-    let input_data = vec![1.0, 0.0];
-    let prediction = neural_network.predict(&input_data);
-    println!("Prediction: {:?}", prediction);
-
-    // Start the core loop
+fn start_core_loop(subconscious: Arc<Mutex<Subconscious>>) {
     tokio::spawn(async move {
         core_loop(subconscious).await;
     });
-
-    // Wait for the API thread to finish (if needed)
-    api_thread.join().unwrap();
 }
 
 // Example shared state struct
